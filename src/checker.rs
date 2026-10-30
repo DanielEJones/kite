@@ -1,11 +1,15 @@
 use std::collections::HashMap;
 
 use crate::lexer::Span;
-use crate::parser::{Ast, Definition, Node, NodeId, Program, Type, TypeDef, TypeId};
+use crate::parser::{
+    Arm, Ast, Definition, FnDef, Node, NodeId, Program, Type, TypeDef, TypeDefBody, TypeId,
+};
 
 pub fn check_program(program: &mut Program) -> Result<(), TypeError> {
     let Program { defs, ast } = program;
-    Checker::new(ast).check_defs(defs)?;
+    let mut checker = Checker::new(ast);
+    checker.desugar_records(defs);
+    checker.check_defs(defs)?;
     Ok(())
 }
 
@@ -40,17 +44,148 @@ impl<'a> Checker<'a> {
         }
     }
 
+    fn desugar_records(&mut self, defs: &mut Vec<Definition>) {
+        let mut generated = Vec::new();
+
+        for def in defs.iter() {
+            let Definition::Type(td) = def else {
+                continue;
+            };
+            let TypeDefBody::Record(fields) = &td.body else {
+                continue;
+            };
+
+            let span = td.span;
+            let ctor = format!("mk_{}", td.name);
+            let binders: Vec<String> = (0..fields.len()).map(|i| format!("_{}", i)).collect();
+            let rec_ty = self.type_app(&td.name, &td.vars, span);
+
+            for (i, (field_name, field_ty)) in fields.iter().enumerate() {
+                // Make the projection function `<field_name> : <rec> -> <field>`
+                let field_var_node = Node::Var(binders[i].clone());
+                let field_var = self.ast.add_node(field_var_node, span);
+                let fn_body = self.match_record("r", &ctor, &binders, field_var, span);
+
+                let proj_type_node = Type::Function(vec![rec_ty], *field_ty);
+                let proj_typ = self.ast.add_type(proj_type_node, span);
+                let fn_type = self.forall(&td.vars, proj_typ, span);
+
+                generated.push(Definition::Function(FnDef {
+                    span,
+                    name: field_name.clone(),
+                    params: vec!["r".to_string()],
+                    typ: fn_type,
+                    body: fn_body,
+                }));
+
+                // Make the update function `with_<field_name> : (<rec>, <field>) -> <rec>`
+                //
+                // Any type variables that appear only in the updated field may change type,
+                // so seach the other fields to see if the var occurs or not and take that
+                // fresh var if not.
+
+                let own_vars = self.unsolved(*field_ty, &td.vars, &Solved::new());
+
+                let mut other_vars = Vec::new();
+                for (_, (_, other_ty)) in fields.iter().enumerate().filter(|(j, _)| *j != i) {
+                    self.collect_unsolved(*other_ty, &td.vars, &Solved::new(), &mut other_vars);
+                }
+
+                let renamed: Vec<String> = own_vars
+                    .into_iter()
+                    .filter(|v| !other_vars.contains(v))
+                    .collect();
+
+                let mut map = Solved::new();
+                let mut new_vars = Vec::new();
+                for v in &renamed {
+                    let fresh_var = format!("{}'", v);
+
+                    let fresh_typ_node = Type::Named(fresh_var.clone());
+                    let fresh_typ = self.ast.add_type(fresh_typ_node, span);
+
+                    map.insert(v.clone(), fresh_typ);
+                    new_vars.push(fresh_var);
+                }
+
+                let new_field_ty = self.substitute(*field_ty, &map);
+                let new_rec_args: Vec<TypeId> = td
+                    .vars
+                    .iter()
+                    .map(|v| match map.get(v) {
+                        Some(t) => *t,
+                        None => self.ast.add_type(Type::Named(v.clone()), span),
+                    })
+                    .collect();
+
+                let new_rec_ty = self.ast.add_type(
+                    if new_rec_args.is_empty() {
+                        Type::Named(td.name.clone())
+                    } else {
+                        Type::Applied(td.name.clone(), new_rec_args)
+                    },
+                    span,
+                );
+
+                let new_ctor_node = Node::Var(ctor.clone());
+                let new_ctor = self.ast.add_node(new_ctor_node, span);
+
+                let new_args: Vec<NodeId> = binders
+                    .iter()
+                    .enumerate()
+                    .map(|(j, name)| {
+                        let name = if j == i {
+                            "v".to_string()
+                        } else {
+                            name.clone()
+                        };
+                        let arg_node = Node::Var(name);
+                        self.ast.add_node(arg_node, span)
+                    })
+                    .collect();
+                let new_call_node = Node::Call(new_ctor, new_args);
+                let new_call = self.ast.add_node(new_call_node, span);
+                let fn_body = self.match_record("r", &ctor, &binders, new_call, span);
+
+                let update_type_node = Type::Function(vec![rec_ty, new_field_ty], new_rec_ty);
+                let update_type = self.ast.add_type(update_type_node, span);
+                let all_vars: Vec<String> = td.vars.iter().cloned().chain(new_vars).collect();
+                let fn_type = self.forall(&all_vars, update_type, span);
+
+                generated.push(Definition::Function(FnDef {
+                    span,
+                    name: format!("with_{}", field_name),
+                    params: vec!["r".to_string(), "v".to_string()],
+                    typ: fn_type,
+                    body: fn_body,
+                }));
+            }
+        }
+
+        defs.extend(generated);
+    }
+
     fn check_defs(&mut self, defs: &[Definition]) -> Result<(), TypeError> {
         // Register every ADT so types can refer to each other in any order
         for def in defs {
             if let Definition::Type(td) = def {
                 let adt = Adt {
                     vars: td.vars.clone(),
-                    ctors: td
-                        .arms
-                        .iter()
-                        .map(|arm| (arm.name.clone(), arm.args.clone()))
-                        .collect(),
+                    ctors: match td.body {
+                        // ADT variants are as-is
+                        TypeDefBody::ADT(ref arms) => arms
+                            .iter()
+                            .map(|arm| (arm.name.clone(), arm.args.clone()))
+                            .collect(),
+
+                        // synthesise one constructor for records
+                        TypeDefBody::Record(ref fields) => {
+                            vec![(
+                                format!("mk_{}", &td.name),
+                                fields.iter().map(|(_, ty)| *ty).collect(),
+                            )]
+                        }
+                    },
                 };
                 if self.adts.insert(td.name.clone(), adt).is_some() {
                     return Err(err(
@@ -107,42 +242,74 @@ impl<'a> Checker<'a> {
 
         let scope = self.scope();
         self.ty_vars.extend(td.vars.iter().cloned());
-        for arm in &td.arms {
-            for arg in &arm.args {
-                self.check_type(*arg)?;
-            }
-        }
-        self.restore(scope);
 
-        for arm in &td.arms {
-            // T or T(A, B, ...), where A, B, ... are the ADT's own variables.
-            let result = if td.vars.is_empty() {
-                Type::Named(td.name.clone())
-            } else {
-                let vars = td
-                    .vars
-                    .iter()
-                    .map(|v| self.ast.add_type(Type::Named(v.clone()), span))
-                    .collect();
-                Type::Applied(td.name.clone(), vars)
-            };
-            let result = self.ast.add_type(result, span);
+        match td.body {
+            TypeDefBody::ADT(ref arms) => {
+                for arm in arms {
+                    for arg in &arm.args {
+                        self.check_type(*arg)?;
+                    }
+                }
 
-            // Nullary constructors are plain values, the rest are functions.
-            let mut ty = if arm.args.is_empty() {
-                result
-            } else {
-                self.ast
-                    .add_type(Type::Function(arm.args.clone(), result), span)
-            };
-            if !td.vars.is_empty() {
-                ty = self.ast.add_type(Type::Forall(td.vars.clone(), ty), span);
+                self.restore(scope);
+                for arm in arms {
+                    self.declare_ctor(&td.name, &arm.name, span, &td.vars, &arm.args)?;
+                }
             }
 
-            self.declare(&arm.name, ty, span)?;
+            TypeDefBody::Record(ref fields) => {
+                for (_, field_ty) in fields {
+                    self.check_type(*field_ty)?;
+                }
+                self.restore(scope);
+
+                let field_types = fields.iter().map(|(_, ty)| *ty).collect();
+                self.declare_ctor(
+                    &td.name,
+                    &format!("mk_{}", td.name),
+                    span,
+                    &td.vars,
+                    &field_types,
+                )?;
+            }
         }
 
         Ok(())
+    }
+
+    fn declare_ctor(
+        &mut self,
+        t_name: &str,
+        c_name: &str,
+        span: Span,
+        vars: &Vec<String>,
+        args: &Vec<TypeId>,
+    ) -> Result<(), TypeError> {
+        // Create the return type of the constructor
+        let result = if vars.is_empty() {
+            Type::Named(t_name.to_string())
+        } else {
+            let vars = vars
+                .iter()
+                .map(|v| self.ast.add_type(Type::Named(v.clone()), span))
+                .collect();
+            Type::Applied(t_name.to_string(), vars)
+        };
+        let result = self.ast.add_type(result, span);
+
+        // Create the type of the constructor
+        let mut ty = if args.is_empty() {
+            result
+        } else {
+            self.ast
+                .add_type(Type::Function(args.clone(), result), span)
+        };
+
+        if !vars.is_empty() {
+            ty = self.ast.add_type(Type::Forall(vars.clone(), ty), span)
+        }
+
+        self.declare(c_name, ty, span)
     }
 
     fn declare(&mut self, name: &str, ty: TypeId, span: Span) -> Result<(), TypeError> {
@@ -787,6 +954,52 @@ impl<'a> Checker<'a> {
 
     fn prim(&mut self, name: &str, span: Span) -> TypeId {
         self.ast.add_type(Type::Named(name.to_string()), span)
+    }
+
+    fn type_app(&mut self, name: &str, vars: &[String], span: Span) -> TypeId {
+        let type_node = if vars.is_empty() {
+            Type::Named(name.to_string())
+        } else {
+            let args = vars
+                .iter()
+                .map(|v| {
+                    let var_node = Type::Named(v.clone());
+                    self.ast.add_type(var_node, span)
+                })
+                .collect();
+            Type::Applied(name.to_string(), args)
+        };
+        self.ast.add_type(type_node, span)
+    }
+
+    fn forall(&mut self, vars: &[String], ty: TypeId, span: Span) -> TypeId {
+        if vars.is_empty() {
+            return ty;
+        }
+
+        let type_node = Type::Forall(vars.to_vec(), ty);
+        self.ast.add_type(type_node, span)
+    }
+
+    fn match_record(
+        &mut self,
+        scrutinee: &str,
+        ctor: &str,
+        binders: &[String],
+        body: NodeId,
+        span: Span,
+    ) -> NodeId {
+        let scrut_node = Node::Var(scrutinee.to_string());
+        let scut = self.ast.add_node(scrut_node, span);
+
+        let arm = Arm {
+            variant: ctor.to_string(),
+            binders: binders.to_vec(),
+            body,
+        };
+
+        let match_node = Node::Match(scut, vec![arm]);
+        self.ast.add_node(match_node, span)
     }
 
     fn bind(&mut self, name: String, ty: TypeId) {
