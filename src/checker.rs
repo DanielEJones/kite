@@ -1,17 +1,12 @@
 use std::collections::HashMap;
 
-use crate::lexer::Span;
-use crate::parser::{
-    Arm, Ast, Definition, FnDef, Node, NodeId, Program, Type, TypeDef, TypeDefBody, TypeId,
+use crate::{
+    lexer::Span,
+    parser::{
+        Arm, Ast, Definition, FnDef, Node, NodeId, Type, TypeDef, TypeDefBody, TypeId,
+        parse_standalone_type_into,
+    },
 };
-
-pub fn check_program(program: &mut Program) -> Result<(), TypeError> {
-    let Program { defs, ast } = program;
-    let mut checker = Checker::new(ast);
-    checker.desugar_records(defs);
-    checker.check_defs(defs)?;
-    Ok(())
-}
 
 pub struct Checker<'a> {
     ast: &'a mut Ast,
@@ -42,6 +37,12 @@ impl<'a> Checker<'a> {
             env: Vec::new(),
             ty_vars: Vec::new(),
         }
+    }
+
+    pub fn check(&mut self, defs: &mut Vec<Definition>) -> Result<(), TypeError> {
+        self.desugar_records(defs);
+        self.check_defs(&defs)?;
+        Ok(())
     }
 
     fn desugar_records(&mut self, defs: &mut Vec<Definition>) {
@@ -229,7 +230,7 @@ impl<'a> Checker<'a> {
                     self.restore(scope);
                     result?;
                 }
-                Definition::Constant(c) => self.check(c.body, c.typ)?,
+                Definition::Constant(c) => self.check_expr(c.body, c.typ)?,
                 Definition::Type(_) => {}
             }
         }
@@ -312,6 +313,13 @@ impl<'a> Checker<'a> {
         self.declare(c_name, ty, span)
     }
 
+    pub fn declare_host_fn(&mut self, name: &str, ty: &str) -> Result<(), TypeError> {
+        let ty = parse_standalone_type_into(ty, &mut self.ast)
+            .unwrap_or_else(|e| panic!("bad signature for host function `{}`: {}", name, e));
+        let span = *self.ast.get_type_span(ty);
+        self.declare(name, ty, span)
+    }
+
     fn declare(&mut self, name: &str, ty: TypeId, span: Span) -> Result<(), TypeError> {
         if self.env.iter().any(|(n, _)| n == name) {
             return Err(err(
@@ -327,7 +335,7 @@ impl<'a> Checker<'a> {
         self.visit(expr, None)
     }
 
-    fn check(&mut self, expr: NodeId, expected: TypeId) -> Result<(), TypeError> {
+    fn check_expr(&mut self, expr: NodeId, expected: TypeId) -> Result<(), TypeError> {
         self.visit(expr, Some(expected)).map(|_| ())
     }
 
@@ -345,40 +353,43 @@ impl<'a> Checker<'a> {
 
             Node::Add(l, r) | Node::Sub(l, r) | Node::Mul(l, r) | Node::Div(l, r) => {
                 let num = self.prim("num", span);
-                self.check(l, num)?;
-                self.check(r, num)?;
+                self.check_expr(l, num)?;
+                self.check_expr(r, num)?;
                 num
             }
 
             Node::Neg(t) => {
                 let num = self.prim("num", span);
-                self.check(t, num)?;
+                self.check_expr(t, num)?;
                 num
             }
 
             Node::Lt(l, r) | Node::Le(l, r) | Node::Gt(l, r) | Node::Ge(l, r) => {
                 let num = self.prim("num", span);
-                self.check(l, num)?;
-                self.check(r, num)?;
+                self.check_expr(l, num)?;
+                self.check_expr(r, num)?;
                 self.prim("bool", span)
             }
 
             Node::And(l, r) | Node::Or(l, r) => {
                 let bool = self.prim("bool", span);
-                self.check(l, bool)?;
-                self.check(r, bool)?;
+                self.check_expr(l, bool)?;
+                self.check_expr(r, bool)?;
                 bool
             }
 
             Node::Not(t) => {
                 let bool = self.prim("bool", span);
-                self.check(t, bool)?;
+                self.check_expr(t, bool)?;
                 bool
             }
 
             Node::Eq(l, r) | Node::Ne(l, r) => {
                 let ty = self.infer(l)?;
-                self.check(r, ty)?;
+                self.check_expr(r, ty)?;
+                if !self.ty_comparable(ty) {
+                    return Err(err(span, TypeErrorKind::NotComparable(ty)));
+                }
                 self.prim("bool", span)
             }
 
@@ -390,7 +401,7 @@ impl<'a> Checker<'a> {
                 let value_ty = match self.annotation(value) {
                     Some(ann) => {
                         self.check_type(ann)?;
-                        self.check(value, ann)?;
+                        self.check_expr(value, ann)?;
                         ann
                     }
                     None => self.infer(value)?,
@@ -405,16 +416,16 @@ impl<'a> Checker<'a> {
 
             Node::If(cond, then, els) => {
                 let bool = self.prim("bool", span);
-                self.check(cond, bool)?;
+                self.check_expr(cond, bool)?;
                 match goal {
                     Some(goal) => {
-                        self.check(then, goal)?;
-                        self.check(els, goal)?;
+                        self.check_expr(then, goal)?;
+                        self.check_expr(els, goal)?;
                         goal
                     }
                     None => {
                         let ty = self.infer(then)?;
-                        self.check(els, ty)?;
+                        self.check_expr(els, ty)?;
                         ty
                     }
                 }
@@ -466,7 +477,7 @@ impl<'a> Checker<'a> {
                         self.bind(binder.clone(), *field);
                     }
                     let arm_ty = match result_ty {
-                        Some(ty) => self.check(arm.body, ty).map(|()| ty),
+                        Some(ty) => self.check_expr(arm.body, ty).map(|()| ty),
                         None => self.infer(arm.body),
                     };
                     self.restore(scope);
@@ -548,7 +559,7 @@ impl<'a> Checker<'a> {
             self.bind(param.clone(), *ty);
         }
         let result = match ret {
-            Some(ret) => self.check(body, ret).map(|()| ret),
+            Some(ret) => self.check_expr(body, ret).map(|()| ret),
             None => self.infer(body),
         };
         self.restore(scope);
@@ -602,7 +613,7 @@ impl<'a> Checker<'a> {
 
             if self.unsolved(pattern, &vars, &solved).is_empty() {
                 let want = self.substitute(pattern, &solved);
-                self.check(arg, want)?;
+                self.check_expr(arg, want)?;
             } else if self.needs_goal(arg) {
                 self.infer_late_arg(arg, pattern, &vars, &mut solved)?;
             } else {
@@ -952,6 +963,50 @@ impl<'a> Checker<'a> {
         Some(variants)
     }
 
+    fn ty_comparable(&self, ty: TypeId) -> bool {
+        self.determine_comparable(ty, &[], &mut Vec::new())
+    }
+
+    fn determine_comparable(
+        &self,
+        ty: TypeId,
+        assumed: &[String],
+        visiting: &mut Vec<String>,
+    ) -> bool {
+        // assumed are types we are assuming to be true, specifically type vars
+        match self.ty(ty) {
+            Type::Named(n) if assumed.contains(&n) => true,
+            Type::Named(n) => {
+                n == "num" || n == "bool" || self.determine_adt_comparable(&n, visiting)
+            }
+            Type::Applied(b, vars) => {
+                vars.iter()
+                    .all(|a| self.determine_comparable(*a, assumed, visiting))
+                    && self.determine_adt_comparable(&b, visiting)
+            }
+            Type::Function(..) | Type::Forall(..) => false,
+        }
+    }
+
+    fn determine_adt_comparable(&self, name: &str, visiting: &mut Vec<String>) -> bool {
+        if visiting.iter().any(|n| n == name) {
+            return true;
+        }
+
+        let Some(adt) = self.adts.get(name) else {
+            return false;
+        };
+
+        visiting.push(name.to_string());
+        let ok = adt.ctors.iter().all(|(_, fields)| {
+            fields
+                .iter()
+                .all(|f| self.determine_comparable(*f, &adt.vars, visiting))
+        });
+        visiting.pop();
+        ok
+    }
+
     fn prim(&mut self, name: &str, span: Span) -> TypeId {
         self.ast.add_type(Type::Named(name.to_string()), span)
     }
@@ -1085,6 +1140,7 @@ pub enum TypeErrorKind {
         got: usize,
     },
     DuplicateDefinition(String),
+    NotComparable(TypeId),
 }
 
 impl TypeError {
@@ -1118,6 +1174,7 @@ impl TypeError {
                 format!("type `{name}` takes {expected} argument(s), but {got} were given")
             }
             DuplicateDefinition(name) => format!("`{name}` is defined more than once"),
+            NotComparable(ty) => format!("cannot compare values of type {}", t(*ty)),
         };
 
         format!("{}: {msg}", self.span)

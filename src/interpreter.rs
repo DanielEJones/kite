@@ -3,20 +3,18 @@ use crate::{
     parser::{ConstDef, Definition, FnDef, Node, NodeId, Program, TypeDef, TypeDefBody, TypeId},
 };
 use core::fmt;
-use std::{collections::HashMap, rc::Rc};
+use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
 pub struct Interpreter {
     program: Program,
     globals: HashMap<String, Value>,
+    constants: HashMap<String, Constant>,
 }
 
 impl Interpreter {
     pub fn new(program: Program) -> Interpreter {
         let mut globals = HashMap::new();
-
-        for (name, f) in builtins() {
-            globals.insert(name.to_string(), Value::Builtin(name, *f));
-        }
+        let mut constants = HashMap::new();
 
         for def in &program.defs {
             match def {
@@ -43,25 +41,30 @@ impl Interpreter {
                     TypeDefBody::Record(fields) => {
                         let args = fields.iter().map(|(_, ty)| *ty).collect();
                         make_variant(&format!("mk_{}", name), &args, &mut globals);
-
-                        // make the method bodies here
                     }
                 },
 
-                Definition::Constant(_) => {}
+                Definition::Constant(ConstDef { name, body, .. }) => {
+                    constants.insert(
+                        name.clone(),
+                        Constant {
+                            body: *body,
+                            state: RefCell::new(ConstantState::Unevaluated),
+                        },
+                    );
+                }
             }
         }
 
-        let mut interpreter = Interpreter { program, globals };
-
-        for def in &interpreter.program.defs {
-            if let Definition::Constant(ConstDef { name, body, .. }) = def {
-                let value = interpreter.eval(*body, Env::Nil).unwrap();
-                interpreter.globals.insert(name.clone(), value);
-            };
+        Interpreter {
+            program,
+            globals,
+            constants,
         }
+    }
 
-        interpreter
+    pub fn register_function(&mut self, name: &str, func: fn(Span, &[Value]) -> EvalResult<Value>) {
+        self.globals.insert(name.to_string(), Value::HostFn(func));
     }
 
     pub fn run(&self, entry: &str, args: Vec<Value>) -> EvalResult<Value> {
@@ -103,13 +106,20 @@ impl Interpreter {
                     return Ok(Value::Bool(b));
                 }
                 Node::Var(ref v) => {
-                    return env
-                        .lookup(v)
-                        .or_else(|| self.globals.get(v).cloned())
-                        .ok_or_else(|| EvalError::Unbound {
-                            span: *self.program.ast.get_node_span(node),
-                            var: v.clone(),
-                        });
+                    let span = *self.program.ast.get_node_span(node);
+                    if let Some(local) = env.lookup(v) {
+                        return Ok(local);
+                    }
+                    if let Some(global) = self.globals.get(v) {
+                        return Ok(global.clone());
+                    }
+                    if let Some(constant) = self.constants.get(v) {
+                        return self.force_constant(constant, v, span);
+                    }
+                    return Err(EvalError::Unbound {
+                        span,
+                        var: v.clone(),
+                    });
                 }
                 Node::Add(l, r) => {
                     return self.arith(l, r, &env, |a, b| a + b);
@@ -164,7 +174,7 @@ impl Interpreter {
                         return Ok(Value::Bool(false));
                     }
 
-                    return Ok(self.eval(r, env)?);
+                    node = r;
                 }
                 Node::Or(l, r) => {
                     let a = self
@@ -175,7 +185,7 @@ impl Interpreter {
                         return Ok(Value::Bool(true));
                     }
 
-                    return Ok(self.eval(r, env)?);
+                    node = r;
                 }
                 Node::Not(v) => {
                     return Ok(Value::Bool(
@@ -260,7 +270,7 @@ impl Interpreter {
                             env = call_env;
                             node = c.body;
                         }
-                        Value::Builtin(_, f) => {
+                        Value::HostFn(f) => {
                             return f(*self.program.ast.get_node_span(node), &args);
                         }
                         Value::Constructor(c) => {
@@ -284,6 +294,31 @@ impl Interpreter {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    fn force_constant(&self, constant: &Constant, name: &str, span: Span) -> EvalResult<Value> {
+        match &*constant.state.borrow() {
+            ConstantState::Unevaluated => {}
+            ConstantState::Evaluated(v) => return Ok(v.clone()),
+            ConstantState::Evaluating => {
+                return Err(EvalError::CyclicConstant {
+                    span,
+                    constant: name.to_string(),
+                });
+            }
+        };
+
+        *constant.state.borrow_mut() = ConstantState::Evaluating;
+        match self.eval(constant.body, Env::Nil) {
+            Ok(value) => {
+                *constant.state.borrow_mut() = ConstantState::Evaluated(value.clone());
+                Ok(value)
+            }
+            Err(e) => {
+                *constant.state.borrow_mut() = ConstantState::Unevaluated;
+                Err(e)
             }
         }
     }
@@ -315,13 +350,24 @@ impl Interpreter {
     }
 }
 
+pub struct Constant {
+    body: NodeId,
+    state: RefCell<ConstantState>,
+}
+
+pub enum ConstantState {
+    Unevaluated,
+    Evaluating,
+    Evaluated(Value),
+}
+
 #[derive(Debug, Clone)]
 pub enum Value {
     Num(f64),
     Bool(bool),
     Variant(Rc<Variant>),
     Closure(Rc<Closure>),
-    Builtin(&'static str, fn(Span, &[Value]) -> EvalResult<Value>),
+    HostFn(fn(Span, &[Value]) -> EvalResult<Value>),
     Constructor(Rc<Constructor>),
 }
 
@@ -344,8 +390,8 @@ impl fmt::Display for Value {
             Value::Closure(_) => {
                 write!(f, "(closure)")
             }
-            Value::Builtin(name, _) => {
-                write!(f, "(builtin {})", name)
+            Value::HostFn(_) => {
+                write!(f, "(host function)")
             }
             Value::Constructor(c) => {
                 write!(f, "(constructor {})", c.name)
@@ -355,7 +401,7 @@ impl fmt::Display for Value {
 }
 
 impl Value {
-    fn as_num(&self, span: Span) -> EvalResult<f64> {
+    pub fn as_num(&self, span: Span) -> EvalResult<f64> {
         match *self {
             Value::Num(n) => Ok(n),
             ref other => Err(EvalError::TypeError {
@@ -366,7 +412,7 @@ impl Value {
         }
     }
 
-    fn as_bool(&self, span: Span) -> EvalResult<bool> {
+    pub fn as_bool(&self, span: Span) -> EvalResult<bool> {
         match *self {
             Value::Bool(b) => Ok(b),
             ref other => Err(EvalError::TypeError {
@@ -377,7 +423,7 @@ impl Value {
         }
     }
 
-    fn as_variant(&self, span: Span) -> EvalResult<Rc<Variant>> {
+    pub fn as_variant(&self, span: Span) -> EvalResult<Rc<Variant>> {
         match self {
             Value::Variant(v) => Ok(v.clone()),
             other => Err(EvalError::TypeError {
@@ -393,15 +439,41 @@ impl Value {
             Value::Num(_) => "number",
             Value::Bool(_) => "boolean",
             Value::Variant(_) => "variant",
-            Value::Closure(_) | Value::Builtin(_, _) | Value::Constructor(_) => "function",
+            Value::Closure(_) | Value::HostFn(_) | Value::Constructor(_) => "function",
         }
     }
 
     fn equals(&self, other: &Value) -> bool {
-        match (self, other) {
-            (Value::Num(l), Value::Num(r)) => l == r,
-            (Value::Bool(l), Value::Bool(r)) => l == r,
-            _ => false,
+        let (mut a, mut b) = (self, other);
+        loop {
+            match (a, b) {
+                (Value::Num(l), Value::Num(r)) => return l == r,
+                (Value::Bool(l), Value::Bool(r)) => return l == r,
+                (Value::Variant(l), Value::Variant(r)) => {
+                    // If the names don't equal, never will be equal
+                    if l.name != r.name {
+                        return false;
+                    }
+
+                    // If we have no fields, trivially equal
+                    let (Some((last_l, init_l)), Some((last_r, init_r))) =
+                        (l.fields.split_last(), r.fields.split_last())
+                    else {
+                        return true;
+                    };
+
+                    // If we had fields, check them left to right
+                    if !init_l.iter().zip(init_r).all(|(l, r)| l.equals(r)) {
+                        return false;
+                    }
+
+                    // As an optimisation do a loop for the last fields so that
+                    // structures like `cons(a, list(a))` don't stack overflow
+                    a = last_l;
+                    b = last_r;
+                }
+                _ => return false,
+            }
         }
     }
 }
@@ -481,7 +553,7 @@ impl Env {
     }
 }
 
-type EvalResult<T> = Result<T, EvalError>;
+pub type EvalResult<T> = Result<T, EvalError>;
 
 #[derive(Debug)]
 pub enum EvalError {
@@ -506,6 +578,10 @@ pub enum EvalError {
     NoMatchError {
         span: Span,
         variant: String,
+    },
+    CyclicConstant {
+        span: Span,
+        constant: String,
     },
 }
 
@@ -543,24 +619,29 @@ impl fmt::Display for EvalError {
             EvalError::NoMatchError { span, variant } => {
                 write!(f, "{}: No match found for variant `{}`", span, variant)
             }
+            EvalError::CyclicConstant { span, constant } => {
+                write!(
+                    f,
+                    "{}: Encountered a cycle while evaluating constant {}",
+                    span, constant
+                )
+            }
         }
     }
 }
 
-fn builtins() -> &'static [(&'static str, fn(Span, &[Value]) -> EvalResult<Value>)] {
-    &[("lt", |span, a| binary(span, a, |x, y| Value::Bool(x < y)))]
-}
-
-fn binary<F>(span: Span, args: &[Value], f: F) -> EvalResult<Value>
-where
-    F: FnOnce(f64, f64) -> Value,
-{
-    match args {
-        [a, b] => Ok(f(a.as_num(span)?, b.as_num(span)?)),
-        _ => Err(EvalError::ArityError {
-            span,
-            expected: 2,
-            got: args.len(),
-        }),
+#[macro_export]
+macro_rules! host_fn {
+    ($span:ident, [$($arg:ident),* $(,)?] $body:expr) => {
+        |$span: Span, args: &[Value]| -> EvalResult<Value> {
+            match args {
+                [$($arg),*] => $body,
+                _ => Err(EvalError::ArityError {
+                    span: $span,
+                    expected: [$(stringify!($arg)),*].len(),
+                    got: args.len(),
+                }),
+            }
+        }
     }
 }
