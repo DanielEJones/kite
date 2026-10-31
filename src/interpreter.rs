@@ -67,35 +67,6 @@ impl Interpreter {
         self.globals.insert(name.to_string(), Value::HostFn(func));
     }
 
-    pub fn run(&self, entry: &str, args: Vec<Value>) -> EvalResult<Value> {
-        let function = self
-            .program
-            .defs
-            .iter()
-            .filter_map(|d| match d {
-                Definition::Function(f) => Some(f),
-                _ => None,
-            })
-            .find(|f| f.name == entry)
-            .expect("Couldn't find the entry point");
-
-        if args.len() != function.params.len() {
-            return Err(EvalError::ArityError {
-                span: function.span,
-                expected: function.params.len(),
-                got: args.len(),
-            });
-        }
-
-        let mut root_env = Env::Nil;
-
-        for (param, arg) in function.params.iter().zip(args) {
-            root_env = root_env.extend(param.clone(), arg);
-        }
-
-        self.eval(function.body, root_env)
-    }
-
     pub fn eval(&self, mut node: NodeId, mut env: Env) -> EvalResult<Value> {
         loop {
             match *self.program.ast.get_node(node) {
@@ -116,9 +87,9 @@ impl Interpreter {
                     if let Some(constant) = self.constants.get(v) {
                         return self.force_constant(constant, v, span);
                     }
-                    return Err(EvalError::Unbound {
+                    return Err(EvalError {
                         span,
-                        var: v.clone(),
+                        kind: EvalErrorKind::Unbound { var: v.clone() },
                     });
                 }
                 Node::Add(l, r) => {
@@ -211,10 +182,12 @@ impl Interpreter {
                         Value::Bool(true) => then,
                         Value::Bool(false) => els,
                         other => {
-                            return Err(EvalError::TypeError {
+                            return Err(EvalError {
                                 span: *self.program.ast.get_node_span(cond),
-                                expected: "boolean",
-                                got: other.type_name(),
+                                kind: EvalErrorKind::TypeError {
+                                    expected: "boolean",
+                                    got: other.type_name(),
+                                },
                             });
                         }
                     }
@@ -227,16 +200,20 @@ impl Interpreter {
                     let arm = arms
                         .iter()
                         .find(|a| a.variant == variant.name)
-                        .ok_or_else(|| EvalError::NoMatchError {
+                        .ok_or_else(|| EvalError {
                             span: *self.program.ast.get_node_span(target),
-                            variant: variant.name.clone(),
+                            kind: EvalErrorKind::NoMatchError {
+                                variant: variant.name.clone(),
+                            },
                         })?;
 
                     if arm.binders.len() != variant.fields.len() {
-                        return Err(EvalError::ArityError {
+                        return Err(EvalError {
                             span: *self.program.ast.get_node_span(arm.body),
-                            expected: variant.fields.len(),
-                            got: arm.binders.len(),
+                            kind: EvalErrorKind::ArityError {
+                                expected: variant.fields.len(),
+                                got: arm.binders.len(),
+                            },
                         });
                     }
 
@@ -256,10 +233,12 @@ impl Interpreter {
                     match f {
                         Value::Closure(c) => {
                             if c.params.len() != args.len() {
-                                return Err(EvalError::ArityError {
+                                return Err(EvalError {
                                     span: *self.program.ast.get_node_span(node),
-                                    expected: c.params.len(),
-                                    got: args.len(),
+                                    kind: EvalErrorKind::ArityError {
+                                        expected: c.params.len(),
+                                        got: args.len(),
+                                    },
                                 });
                             }
 
@@ -275,10 +254,12 @@ impl Interpreter {
                         }
                         Value::Constructor(c) => {
                             if c.arity != args.len() {
-                                return Err(EvalError::ArityError {
+                                return Err(EvalError {
                                     span: *self.program.ast.get_node_span(node),
-                                    expected: c.arity,
-                                    got: args.len(),
+                                    kind: EvalErrorKind::ArityError {
+                                        expected: c.arity,
+                                        got: args.len(),
+                                    },
                                 });
                             }
                             return Ok(Value::Variant(Rc::new(Variant {
@@ -287,9 +268,11 @@ impl Interpreter {
                             })));
                         }
                         other => {
-                            return Err(EvalError::NotCallableError {
+                            return Err(EvalError {
                                 span: *self.program.ast.get_node_span(fun),
-                                ty: other.type_name(),
+                                kind: EvalErrorKind::NotCallableError {
+                                    ty: other.type_name(),
+                                },
                             });
                         }
                     }
@@ -303,9 +286,11 @@ impl Interpreter {
             ConstantState::Unevaluated => {}
             ConstantState::Evaluated(v) => return Ok(v.clone()),
             ConstantState::Evaluating => {
-                return Err(EvalError::CyclicConstant {
+                return Err(EvalError {
                     span,
-                    constant: name.to_string(),
+                    kind: EvalErrorKind::CyclicConstant {
+                        constant: name.to_string(),
+                    },
                 });
             }
         };
@@ -404,10 +389,12 @@ impl Value {
     pub fn as_num(&self, span: Span) -> EvalResult<f64> {
         match *self {
             Value::Num(n) => Ok(n),
-            ref other => Err(EvalError::TypeError {
+            ref other => Err(EvalError {
                 span,
-                expected: "number",
-                got: other.type_name(),
+                kind: EvalErrorKind::TypeError {
+                    expected: "number",
+                    got: other.type_name(),
+                },
             }),
         }
     }
@@ -415,10 +402,12 @@ impl Value {
     pub fn as_bool(&self, span: Span) -> EvalResult<bool> {
         match *self {
             Value::Bool(b) => Ok(b),
-            ref other => Err(EvalError::TypeError {
+            ref other => Err(EvalError {
                 span,
-                expected: "boolean",
-                got: other.type_name(),
+                kind: EvalErrorKind::TypeError {
+                    expected: "boolean",
+                    got: other.type_name(),
+                },
             }),
         }
     }
@@ -426,10 +415,12 @@ impl Value {
     pub fn as_variant(&self, span: Span) -> EvalResult<Rc<Variant>> {
         match self {
             Value::Variant(v) => Ok(v.clone()),
-            other => Err(EvalError::TypeError {
+            other => Err(EvalError {
                 span,
-                expected: "variant",
-                got: other.type_name(),
+                kind: EvalErrorKind::TypeError {
+                    expected: "variant",
+                    got: other.type_name(),
+                },
             }),
         }
     }
@@ -556,77 +547,60 @@ impl Env {
 pub type EvalResult<T> = Result<T, EvalError>;
 
 #[derive(Debug)]
-pub enum EvalError {
+pub struct EvalError {
+    pub span: Span,
+    pub kind: EvalErrorKind,
+}
+
+#[derive(Debug)]
+pub enum EvalErrorKind {
     Unbound {
-        span: Span,
         var: String,
     },
     TypeError {
-        span: Span,
         expected: &'static str,
         got: &'static str,
     },
     ArityError {
-        span: Span,
         expected: usize,
         got: usize,
     },
     NotCallableError {
-        span: Span,
         ty: &'static str,
     },
     NoMatchError {
-        span: Span,
         variant: String,
     },
     CyclicConstant {
-        span: Span,
         constant: String,
     },
 }
 
-impl fmt::Display for EvalError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match &self {
-            EvalError::Unbound { span, var } => {
-                write!(f, "{}: Unbound variable `{}`", span, var)
+impl EvalError {
+    pub fn message(&self) -> String {
+        match &self.kind {
+            EvalErrorKind::Unbound { var } => format!("Unbound variable `{}`", var),
+            EvalErrorKind::ArityError { expected, got } => format!(
+                "Unexpected argument count, expected {} but got {}",
+                expected, got
+            ),
+            EvalErrorKind::TypeError { expected, got } => {
+                format!("Unexpected type, expected `{}` but got `{}`", expected, got)
             }
-            EvalError::ArityError {
-                span,
-                expected,
-                got,
-            } => {
-                write!(
-                    f,
-                    "{}: Unexpected argument count, expected {} but got {}",
-                    span, expected, got
-                )
+            EvalErrorKind::NotCallableError { ty } => format!("Cannot call value of type `{}`", ty),
+            EvalErrorKind::NoMatchError { variant } => {
+                format!("No match found for variant `{}`", variant)
             }
-            EvalError::TypeError {
-                span,
-                expected,
-                got,
-            } => {
-                write!(
-                    f,
-                    "{}: Unexpected type, expected `{}` but got `{}`",
-                    span, expected, got
-                )
-            }
-            EvalError::NotCallableError { span, ty } => {
-                write!(f, "{}: Cannot call value of type `{}`", span, ty)
-            }
-            EvalError::NoMatchError { span, variant } => {
-                write!(f, "{}: No match found for variant `{}`", span, variant)
-            }
-            EvalError::CyclicConstant { span, constant } => {
-                write!(
-                    f,
-                    "{}: Encountered a cycle while evaluating constant {}",
-                    span, constant
-                )
+            EvalErrorKind::CyclicConstant { constant } => {
+                format!("Encountered a cycle while evaluating constant {}", constant)
             }
         }
+    }
+}
+
+impl fmt::Display for EvalError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.span, self.message())
     }
 }
 
@@ -636,10 +610,12 @@ macro_rules! host_fn {
         |$span: Span, args: &[Value]| -> EvalResult<Value> {
             match args {
                 [$($arg),*] => $body,
-                _ => Err(EvalError::ArityError {
+                _ => Err(EvalError {
                     span: $span,
-                    expected: [$(stringify!($arg)),*].len(),
-                    got: args.len(),
+                    kind: EvalErrorKind::ArityError {
+                        expected: [$(stringify!($arg)),*].len(),
+                        got: args.len(),
+                    },
                 }),
             }
         }

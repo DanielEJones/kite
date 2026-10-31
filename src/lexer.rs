@@ -273,9 +273,9 @@ impl fmt::Display for TokenKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Span {
-    file: u32,
-    start: usize,
-    end: usize,
+    pub file: u32,
+    pub start: usize,
+    pub end: usize,
 }
 
 impl fmt::Display for Span {

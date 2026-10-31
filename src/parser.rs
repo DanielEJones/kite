@@ -1,6 +1,7 @@
 use crate::lexer::{HOST_FILE, Lexer, Span, Token, TokenKind};
 use core::fmt;
 use std::cmp::Ordering;
+use std::fmt::Write as _;
 
 pub struct Parser {
     token_source: Lexer,
@@ -903,22 +904,22 @@ pub struct ParseError {
 
 impl fmt::Display for ParseError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}: Unexpected {}", self.span, self.found)?;
-        match self.expected.as_slice() {
-            [] => write!(f, "."),
-            [only] => write!(f, ", expected {only}"),
-            [rest @ .., last] => {
-                write!(f, ", expected one of ")?;
-                for (i, kind) in rest.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
+        write!(f, "{}: {}", self.span, self.message())
+    }
+}
 
-                    write!(f, "{kind}")?;
-                }
-                write!(f, ", or {last}")
+impl ParseError {
+    pub fn message(&self) -> String {
+        let mut out = format!("Unexpected {}", self.found);
+        match self.expected.as_slice() {
+            [] => out.push('.'),
+            [only] => write!(out, ", expected {}.", only).unwrap(),
+            [rest @ .., last] => {
+                let rest: Vec<String> = rest.iter().map(|k| k.to_string()).collect();
+                write!(out, ", expected one of {}, or {}.", rest.join(", "), last).unwrap();
             }
         }
+        out
     }
 }
 

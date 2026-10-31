@@ -1144,11 +1144,11 @@ pub enum TypeErrorKind {
 }
 
 impl TypeError {
-    pub fn render(&self, ast: &Ast) -> String {
+    pub fn message(&self, ast: &Ast) -> String {
         use TypeErrorKind::*;
         let t = |id: TypeId| show_type(ast, id);
 
-        let msg = match &self.kind {
+        match &self.kind {
             TypeMismatch { expected, got } => {
                 format!("type mismatch: expected {}, got {}", t(*expected), t(*got))
             }
@@ -1175,9 +1175,7 @@ impl TypeError {
             }
             DuplicateDefinition(name) => format!("`{name}` is defined more than once"),
             NotComparable(ty) => format!("cannot compare values of type {}", t(*ty)),
-        };
-
-        format!("{}: {msg}", self.span)
+        }
     }
 }
 

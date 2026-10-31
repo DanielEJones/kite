@@ -1,22 +1,25 @@
-use std::{fmt, io, rc::Rc};
+use std::rc::Rc;
 
 use crate::{
     checker::{Checker, TypeError},
-    interpreter::{EvalError, EvalResult, Interpreter, Value, Variant},
+    error::SourceMap,
+    interpreter::{EvalError, EvalErrorKind, EvalResult, Interpreter, Value, Variant},
     lexer::{HOST_FILE, Span},
-    parser::{Ast, ParseError, Program, parse_file_into},
+    parser::{Ast, Definition, Program, parse_file_into},
 };
+
+pub use crate::error::Error;
 
 pub struct EngineBuilder {
     host_fns: Vec<HostDecl>,
-    source_files: Vec<(String, String)>,
+    source_files: SourceMap,
 }
 
 impl EngineBuilder {
     pub fn new() -> EngineBuilder {
         EngineBuilder {
             host_fns: Vec::new(),
-            source_files: Vec::new(),
+            source_files: SourceMap::new(),
         }
     }
 
@@ -39,7 +42,7 @@ impl EngineBuilder {
             path: path.to_string(),
             source,
         })?;
-        self.source_files.push((path.to_string(), text));
+        self.source_files.add(path, &text);
         Ok(self)
     }
 
@@ -52,19 +55,13 @@ impl EngineBuilder {
         let mut ast = Ast::new();
         let mut defs = Vec::new();
 
-        for (id, (_, text)) in source_files.iter().enumerate() {
-            let parsed_source = parse_file_into(text, id as u32, &mut ast).map_err(Error::Parse)?;
+        for (id, text) in source_files.texts().enumerate() {
+            let parsed_source = parse_file_into(text, id as u32, &mut ast)
+                .map_err(|e| source_files.parse_error(&e))?;
             defs.extend(parsed_source);
         }
 
-        let mut checker = Checker::new(&mut ast);
-        for host_fn in &host_fns {
-            checker
-                .declare_host_fn(&host_fn.name, &host_fn.signature)
-                .map_err(Error::Type)?;
-        }
-
-        checker.check(&mut defs).map_err(Error::Type)?;
+        check(&mut ast, &mut defs, &host_fns).map_err(|e| source_files.type_error(&e, &ast))?;
 
         let mut interpreter = Interpreter::new(Program { defs, ast });
         for host_fn in host_fns {
@@ -78,6 +75,18 @@ impl EngineBuilder {
     }
 }
 
+fn check(
+    ast: &mut Ast,
+    defs: &mut Vec<Definition>,
+    host_fns: &[HostDecl],
+) -> Result<(), TypeError> {
+    let mut checker = Checker::new(ast);
+    for h in host_fns {
+        checker.declare_host_fn(&h.name, &h.signature)?;
+    }
+    checker.check(defs)
+}
+
 struct HostDecl {
     name: String,
     signature: String,
@@ -86,7 +95,7 @@ struct HostDecl {
 
 pub struct Engine {
     interpreter: Interpreter,
-    source_files: Vec<(String, String)>,
+    source_files: SourceMap,
 }
 
 impl Engine {
@@ -101,7 +110,7 @@ impl Engine {
             let result = self
                 .interpreter
                 .force_constant(constant, name, span)
-                .map_err(Error::Runtime)?;
+                .map_err(|e| self.runtime_error(e))?;
             return Ok(result);
         }
 
@@ -115,10 +124,12 @@ impl Engine {
         match func {
             Value::Closure(c) => {
                 if c.params.len() != args.len() {
-                    return Err(Error::Runtime(EvalError::ArityError {
+                    return Err(self.runtime_error(EvalError {
                         span,
-                        expected: c.params.len(),
-                        got: args.len(),
+                        kind: EvalErrorKind::ArityError {
+                            expected: c.params.len(),
+                            got: args.len(),
+                        },
                     }));
                 }
 
@@ -127,15 +138,19 @@ impl Engine {
                     env = env.extend(param.clone(), val.clone());
                 }
 
-                self.interpreter.eval(c.body, env).map_err(Error::Runtime)
+                self.interpreter
+                    .eval(c.body, env)
+                    .map_err(|e| self.runtime_error(e))
             }
 
             Value::Constructor(c) => {
                 if c.arity != args.len() {
-                    return Err(Error::Runtime(EvalError::ArityError {
+                    return Err(self.runtime_error(EvalError {
                         span,
-                        expected: c.arity,
-                        got: args.len(),
+                        kind: EvalErrorKind::ArityError {
+                            expected: c.arity,
+                            got: args.len(),
+                        },
                     }));
                 }
 
@@ -145,32 +160,18 @@ impl Engine {
                 })))
             }
 
-            Value::HostFn(h) => h(span, args).map_err(Error::Runtime),
+            Value::HostFn(h) => h(span, args).map_err(|e| self.runtime_error(e)),
 
-            other => Err(Error::Runtime(EvalError::NotCallableError {
+            other => Err(self.runtime_error(EvalError {
                 span,
-                ty: other.type_name(),
+                kind: EvalErrorKind::NotCallableError {
+                    ty: other.type_name(),
+                },
             })),
         }
     }
-}
 
-pub enum Error {
-    IO { path: String, source: io::Error },
-    Unbound(String),
-    Type(TypeError),
-    Parse(ParseError),
-    Runtime(EvalError),
-}
-
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::IO { path, source } => write!(f, "{}: {}", path, source),
-            Self::Unbound(n) => write!(f, "No value named `{}` in scope.", n),
-            Self::Parse(e) => write!(f, "{}", e),
-            Self::Runtime(e) => write!(f, "{}", e),
-            Self::Type(_) => write!(f, "type error"),
-        }
+    fn runtime_error(&self, e: EvalError) -> Error {
+        self.source_files.runtime_error(&e)
     }
 }
