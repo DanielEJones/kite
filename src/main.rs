@@ -1,56 +1,35 @@
-use std::fs::read_to_string;
-
-mod lexer;
-use lexer::{Lexer, Span};
-
-mod parser;
-use parser::Parser;
-
 mod checker;
-use checker::Checker;
-
+mod engine;
+mod error;
 mod interpreter;
-use interpreter::{EvalError, EvalResult, Interpreter};
+mod lexer;
+mod parser;
 
-use crate::interpreter::Value;
+use crate::{
+    engine::{EngineBuilder, Error},
+    interpreter::{EvalError, EvalErrorKind, EvalResult, Value},
+    lexer::Span,
+};
+
+fn run() -> Result<Value, Error> {
+    let engine = EngineBuilder::new()
+        .add_source_file("example.txt")?
+        .add_host_fn(
+            "sqrt",
+            "num -> num",
+            host_fn!(span, [n] {
+                let num = n.as_num(span)?;
+                Ok(Value::Num(num.sqrt()))
+            }),
+        )
+        .build()?;
+
+    engine.call("main", &[Value::Num(1.0)])
+}
 
 fn main() {
-    let source = read_to_string("example.txt").expect("Failed to open file");
-    let lexer = Lexer::new(source);
-
-    let parser = Parser::new(lexer);
-    let mut program = match parser.parse() {
-        Ok(tree) => tree,
-        Err(e) => {
-            eprintln!("{}", e);
-            return;
-        }
-    };
-
-    let mut checker = Checker::new(&mut program.ast);
-    checker.declare_host_fn("sqrt", "num -> num").unwrap();
-
-    if let Err(e) = checker.check(&mut program.defs) {
-        eprintln!("{}", e.render(&program.ast));
-        return;
+    match run() {
+        Ok(val) => println!("{}", val),
+        Err(e) => eprintln!("{}", e),
     }
-
-    let mut interpreter = Interpreter::new(program);
-    interpreter.register_function(
-        "sqrt",
-        host_fn!(span, [n] {
-            let num = n.as_num(span)?;
-            Ok(Value::Num(num.sqrt()))
-        }),
-    );
-
-    let result = match interpreter.run("main", vec![Value::Num(1.0)]) {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("{}", e);
-            return;
-        }
-    };
-
-    println!("{}", result);
 }

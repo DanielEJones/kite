@@ -6,16 +6,17 @@ pub struct Lexer {
 }
 
 impl Lexer {
-    pub fn new(source: String) -> Lexer {
+    pub fn new(source: String, file: u32) -> Lexer {
         Lexer {
             data: source,
-            span: Span::new(),
+            span: Span::new(file),
         }
     }
 
     pub fn lex_token(&mut self) -> Token {
         self.lex_whitespace();
         self.span = Span {
+            file: self.span.file,
             start: self.span.end,
             end: self.span.end,
         };
@@ -272,8 +273,9 @@ impl fmt::Display for TokenKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Span {
-    start: usize,
-    end: usize,
+    pub file: u32,
+    pub start: usize,
+    pub end: usize,
 }
 
 impl fmt::Display for Span {
@@ -283,14 +285,21 @@ impl fmt::Display for Span {
 }
 
 impl Span {
-    pub fn new() -> Span {
-        Span { start: 0, end: 0 }
+    pub fn new(file: u32) -> Span {
+        Span {
+            file,
+            start: 0,
+            end: 0,
+        }
     }
 
     pub fn merge_with(&self, other: Span) -> Span {
         Span {
+            file: self.file,
             start: std::cmp::min(self.start, other.start),
             end: std::cmp::max(self.end, other.end),
         }
     }
 }
+
+pub const HOST_FILE: u32 = u32::MAX;

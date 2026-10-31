@@ -4,7 +4,7 @@ use crate::{
     lexer::Span,
     parser::{
         Arm, Ast, Definition, FnDef, Node, NodeId, Type, TypeDef, TypeDefBody, TypeId,
-        parse_standalone_type_into,
+        parse_type_into,
     },
 };
 
@@ -314,7 +314,7 @@ impl<'a> Checker<'a> {
     }
 
     pub fn declare_host_fn(&mut self, name: &str, ty: &str) -> Result<(), TypeError> {
-        let ty = parse_standalone_type_into(ty, &mut self.ast)
+        let ty = parse_type_into(ty, &mut self.ast)
             .unwrap_or_else(|e| panic!("bad signature for host function `{}`: {}", name, e));
         let span = *self.ast.get_type_span(ty);
         self.declare(name, ty, span)
@@ -1144,11 +1144,11 @@ pub enum TypeErrorKind {
 }
 
 impl TypeError {
-    pub fn render(&self, ast: &Ast) -> String {
+    pub fn message(&self, ast: &Ast) -> String {
         use TypeErrorKind::*;
         let t = |id: TypeId| show_type(ast, id);
 
-        let msg = match &self.kind {
+        match &self.kind {
             TypeMismatch { expected, got } => {
                 format!("type mismatch: expected {}, got {}", t(*expected), t(*got))
             }
@@ -1175,9 +1175,7 @@ impl TypeError {
             }
             DuplicateDefinition(name) => format!("`{name}` is defined more than once"),
             NotComparable(ty) => format!("cannot compare values of type {}", t(*ty)),
-        };
-
-        format!("{}: {msg}", self.span)
+        }
     }
 }
 

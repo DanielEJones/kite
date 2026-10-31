@@ -1,12 +1,13 @@
-use crate::lexer::{Lexer, Span, Token, TokenKind};
+use crate::lexer::{HOST_FILE, Lexer, Span, Token, TokenKind};
 use core::fmt;
 use std::cmp::Ordering;
+use std::fmt::Write as _;
 
 pub struct Parser {
     token_source: Lexer,
     saved_tokens: Vec<Token>,
     position: usize,
-    tree: Ast,
+    pub tree: Ast,
     furthest: Furthest,
 }
 
@@ -64,7 +65,7 @@ impl Parser {
         }
     }
 
-    pub fn parse(mut self) -> ParseResult<Program> {
+    pub fn parse(&mut self) -> ParseResult<Vec<Definition>> {
         let mut defs = Vec::new();
 
         while let Ok(def) = self.parse_definition().ok_or_else(|| self.error()) {
@@ -72,10 +73,7 @@ impl Parser {
         }
 
         self.expect(TokenKind::End).ok_or_else(|| self.error())?;
-        Ok(Program {
-            ast: self.tree,
-            defs,
-        })
+        Ok(defs)
     }
 
     fn mark(&self) -> Mark {
@@ -866,8 +864,8 @@ impl Parser {
     }
 }
 
-pub fn parse_standalone_type_into(ty: &str, ast: &mut Ast) -> ParseResult<TypeId> {
-    let lexer = Lexer::new(ty.to_string());
+pub fn parse_type_into(ty: &str, ast: &mut Ast) -> ParseResult<TypeId> {
+    let lexer = Lexer::new(ty.to_string(), HOST_FILE);
     let mut parser = Parser::new(lexer);
 
     parser.tree = std::mem::take(ast);
@@ -884,6 +882,17 @@ pub fn parse_standalone_type_into(ty: &str, ast: &mut Ast) -> ParseResult<TypeId
     result
 }
 
+pub fn parse_file_into(source: &str, file_id: u32, ast: &mut Ast) -> ParseResult<Vec<Definition>> {
+    let lexer = Lexer::new(source.to_string(), file_id);
+    let mut parser = Parser::new(lexer);
+
+    parser.tree = std::mem::take(ast);
+    let result = parser.parse();
+    *ast = parser.tree;
+
+    result
+}
+
 type ParseResult<T> = Result<T, ParseError>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -895,22 +904,22 @@ pub struct ParseError {
 
 impl fmt::Display for ParseError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}: Unexpected {}", self.span, self.found)?;
-        match self.expected.as_slice() {
-            [] => write!(f, "."),
-            [only] => write!(f, ", expected {only}"),
-            [rest @ .., last] => {
-                write!(f, ", expected one of ")?;
-                for (i, kind) in rest.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
+        write!(f, "{}: {}", self.span, self.message())
+    }
+}
 
-                    write!(f, "{kind}")?;
-                }
-                write!(f, ", or {last}")
+impl ParseError {
+    pub fn message(&self) -> String {
+        let mut out = format!("Unexpected {}", self.found);
+        match self.expected.as_slice() {
+            [] => out.push('.'),
+            [only] => write!(out, ", expected {}.", only).unwrap(),
+            [rest @ .., last] => {
+                let rest: Vec<String> = rest.iter().map(|k| k.to_string()).collect();
+                write!(out, ", expected one of {}, or {}.", rest.join(", "), last).unwrap();
             }
         }
+        out
     }
 }
 
