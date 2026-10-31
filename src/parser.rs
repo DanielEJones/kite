@@ -1,4 +1,4 @@
-use crate::lexer::{Lexer, Span, Token, TokenKind};
+use crate::lexer::{HOST_FILE, Lexer, Span, Token, TokenKind};
 use core::fmt;
 use std::cmp::Ordering;
 
@@ -6,7 +6,7 @@ pub struct Parser {
     token_source: Lexer,
     saved_tokens: Vec<Token>,
     position: usize,
-    tree: Ast,
+    pub tree: Ast,
     furthest: Furthest,
 }
 
@@ -64,7 +64,7 @@ impl Parser {
         }
     }
 
-    pub fn parse(mut self) -> ParseResult<Program> {
+    pub fn parse(&mut self) -> ParseResult<Vec<Definition>> {
         let mut defs = Vec::new();
 
         while let Ok(def) = self.parse_definition().ok_or_else(|| self.error()) {
@@ -72,10 +72,7 @@ impl Parser {
         }
 
         self.expect(TokenKind::End).ok_or_else(|| self.error())?;
-        Ok(Program {
-            ast: self.tree,
-            defs,
-        })
+        Ok(defs)
     }
 
     fn mark(&self) -> Mark {
@@ -866,8 +863,8 @@ impl Parser {
     }
 }
 
-pub fn parse_standalone_type_into(ty: &str, ast: &mut Ast) -> ParseResult<TypeId> {
-    let lexer = Lexer::new(ty.to_string());
+pub fn parse_type_into(ty: &str, ast: &mut Ast) -> ParseResult<TypeId> {
+    let lexer = Lexer::new(ty.to_string(), HOST_FILE);
     let mut parser = Parser::new(lexer);
 
     parser.tree = std::mem::take(ast);
@@ -881,6 +878,17 @@ pub fn parse_standalone_type_into(ty: &str, ast: &mut Ast) -> ParseResult<TypeId
     let result = result.ok_or_else(|| parser.error());
 
     *ast = parser.tree;
+    result
+}
+
+pub fn parse_file_into(source: &str, file_id: u32, ast: &mut Ast) -> ParseResult<Vec<Definition>> {
+    let lexer = Lexer::new(source.to_string(), file_id);
+    let mut parser = Parser::new(lexer);
+
+    parser.tree = std::mem::take(ast);
+    let result = parser.parse();
+    *ast = parser.tree;
+
     result
 }
 

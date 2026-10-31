@@ -6,9 +6,9 @@ use core::fmt;
 use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
 pub struct Interpreter {
-    program: Program,
-    globals: HashMap<String, Value>,
-    constants: HashMap<String, Constant>,
+    pub program: Program,
+    pub globals: HashMap<String, Value>,
+    pub constants: HashMap<String, Constant>,
 }
 
 impl Interpreter {
@@ -96,7 +96,7 @@ impl Interpreter {
         self.eval(function.body, root_env)
     }
 
-    fn eval(&self, mut node: NodeId, mut env: Env) -> EvalResult<Value> {
+    pub fn eval(&self, mut node: NodeId, mut env: Env) -> EvalResult<Value> {
         loop {
             match *self.program.ast.get_node(node) {
                 Node::Num(n) => {
@@ -298,7 +298,7 @@ impl Interpreter {
         }
     }
 
-    fn force_constant(&self, constant: &Constant, name: &str, span: Span) -> EvalResult<Value> {
+    pub fn force_constant(&self, constant: &Constant, name: &str, span: Span) -> EvalResult<Value> {
         match &*constant.state.borrow() {
             ConstantState::Unevaluated => {}
             ConstantState::Evaluated(v) => return Ok(v.clone()),
@@ -434,7 +434,7 @@ impl Value {
         }
     }
 
-    fn type_name(&self) -> &'static str {
+    pub fn type_name(&self) -> &'static str {
         match *self {
             Value::Num(_) => "number",
             Value::Bool(_) => "boolean",
@@ -497,25 +497,25 @@ fn make_variant(name: &String, args: &Vec<TypeId>, defs: &mut HashMap<String, Va
 
 #[derive(Debug)]
 pub struct Variant {
-    name: String,
-    fields: Vec<Value>,
+    pub name: String,
+    pub fields: Vec<Value>,
 }
 
 #[derive(Debug)]
 pub struct Closure {
-    params: Vec<String>,
-    body: NodeId,
-    env: Env,
+    pub params: Vec<String>,
+    pub body: NodeId,
+    pub env: Env,
 }
 
 #[derive(Debug)]
 pub struct Constructor {
-    name: String,
-    arity: usize,
+    pub name: String,
+    pub arity: usize,
 }
 
 #[derive(Debug, Clone)]
-enum Env {
+pub enum Env {
     Nil,
     Cons {
         name: String,
@@ -525,7 +525,7 @@ enum Env {
 }
 
 impl Env {
-    fn lookup(&self, v: &str) -> Option<Value> {
+    pub fn lookup(&self, v: &str) -> Option<Value> {
         let mut current = self;
         loop {
             match current {
@@ -544,7 +544,7 @@ impl Env {
         }
     }
 
-    fn extend(&self, name: String, value: Value) -> Env {
+    pub fn extend(&self, name: String, value: Value) -> Env {
         Env::Cons {
             name,
             value,

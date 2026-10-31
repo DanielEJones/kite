@@ -4,7 +4,7 @@ use crate::{
     lexer::Span,
     parser::{
         Arm, Ast, Definition, FnDef, Node, NodeId, Type, TypeDef, TypeDefBody, TypeId,
-        parse_standalone_type_into,
+        parse_type_into,
     },
 };
 
@@ -314,7 +314,7 @@ impl<'a> Checker<'a> {
     }
 
     pub fn declare_host_fn(&mut self, name: &str, ty: &str) -> Result<(), TypeError> {
-        let ty = parse_standalone_type_into(ty, &mut self.ast)
+        let ty = parse_type_into(ty, &mut self.ast)
             .unwrap_or_else(|e| panic!("bad signature for host function `{}`: {}", name, e));
         let span = *self.ast.get_type_span(ty);
         self.declare(name, ty, span)
