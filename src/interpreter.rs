@@ -1,6 +1,6 @@
 use crate::{
     lexer::Span,
-    parser::{ConstDef, Definition, FnDef, Node, NodeId, Program, TypeDef},
+    parser::{ConstDef, Definition, FnDef, Node, NodeId, Program, TypeDef, TypeDefBody, TypeId},
 };
 use core::fmt;
 use std::{collections::HashMap, rc::Rc};
@@ -33,24 +33,20 @@ impl Interpreter {
                     );
                 }
 
-                Definition::Type(TypeDef { arms, .. }) => {
-                    for variant in arms {
-                        globals.insert(
-                            variant.name.clone(),
-                            if variant.args.is_empty() {
-                                Value::Variant(Rc::new(Variant {
-                                    name: variant.name.clone(),
-                                    fields: Vec::new(),
-                                }))
-                            } else {
-                                Value::Constructor(Rc::new(Constructor {
-                                    name: variant.name.clone(),
-                                    arity: variant.args.len(),
-                                }))
-                            },
-                        );
+                Definition::Type(TypeDef { body, name, .. }) => match body {
+                    TypeDefBody::ADT(arms) => {
+                        for variant in arms {
+                            make_variant(&variant.name, &variant.args, &mut globals);
+                        }
                     }
-                }
+
+                    TypeDefBody::Record(fields) => {
+                        let args = fields.iter().map(|(_, ty)| *ty).collect();
+                        make_variant(&format!("mk_{}", name), &args, &mut globals);
+
+                        // make the method bodies here
+                    }
+                },
 
                 Definition::Constant(_) => {}
             }
@@ -154,7 +150,8 @@ impl Interpreter {
                 }
                 Node::Ne(l, r) => {
                     return Ok(Value::Bool(
-                        self.eval(l, env.clone())?
+                        !self
+                            .eval(l, env.clone())?
                             .equals(&self.eval(r, env.clone())?),
                     ));
                 }
@@ -407,6 +404,23 @@ impl Value {
             _ => false,
         }
     }
+}
+
+fn make_variant(name: &String, args: &Vec<TypeId>, defs: &mut HashMap<String, Value>) {
+    defs.insert(
+        name.clone(),
+        if args.is_empty() {
+            Value::Variant(Rc::new(Variant {
+                name: name.clone(),
+                fields: Vec::new(),
+            }))
+        } else {
+            Value::Constructor(Rc::new(Constructor {
+                name: name.clone(),
+                arity: args.len(),
+            }))
+        },
+    );
 }
 
 #[derive(Debug)]

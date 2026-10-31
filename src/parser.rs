@@ -40,7 +40,12 @@ pub struct TypeDef {
     pub span: Span,
     pub name: String,
     pub vars: Vec<String>,
-    pub arms: Vec<Variant>,
+    pub body: TypeDefBody,
+}
+
+pub enum TypeDefBody {
+    ADT(Vec<Variant>),
+    Record(Vec<(String, TypeId)>),
 }
 
 pub struct Variant {
@@ -206,7 +211,7 @@ impl Parser {
     }
 
     fn parse_type_definition(&mut self) -> Option<Definition> {
-        // TYPE_DEF ::= "type" IDENT ["(" IDENT ("," IDENT)* ")"] "=" VARIANT+ ";"
+        // TYPE_DEF ::= "type" IDENT ["(" IDENT ("," IDENT)* ")"] "=" TYPE_DEF_BODY ";"
         self.attempt(|p| {
             let start = p.expect(TokenKind::Type)?;
             let name = p.expect(TokenKind::Identifier)?;
@@ -224,14 +229,7 @@ impl Parser {
 
             p.expect(TokenKind::Eq)?;
 
-            let mut arms = Vec::new();
-            while let Some(arm) = p.attempt(Self::parse_variant) {
-                arms.push(arm);
-            }
-
-            if arms.len() < 1 {
-                return None;
-            }
+            let body = p.parse_type_definition_body()?;
 
             let end = p.expect(TokenKind::Semi)?;
 
@@ -242,9 +240,41 @@ impl Parser {
                 span,
                 name,
                 vars,
-                arms,
+                body,
             }))
         })
+    }
+
+    fn parse_type_definition_body(&mut self) -> Option<TypeDefBody> {
+        // TYPE_DEF_BODY ::= "record" "{" PARAMS "}" | VARIANT+
+        if self.eat(TokenKind::Record) {
+            self.attempt(|p| {
+                p.expect(TokenKind::LBrace)?;
+
+                let fields = p.parse_comma_separated(|p| {
+                    let name = p.expect(TokenKind::Identifier)?;
+                    let name = p.string_from_token(name);
+                    p.expect(TokenKind::Colon)?;
+                    let typ = p.parse_type()?;
+                    Some((name, typ))
+                });
+
+                p.expect(TokenKind::RBrace)?;
+                Some(TypeDefBody::Record(fields))
+            })
+        } else {
+            let mut variants = Vec::new();
+
+            while let Some(variant) = self.parse_variant() {
+                variants.push(variant);
+            }
+
+            if variants.is_empty() {
+                return None;
+            }
+
+            Some(TypeDefBody::ADT(variants))
+        }
     }
 
     fn parse_variant(&mut self) -> Option<Variant> {
@@ -917,7 +947,7 @@ impl Ast {
         self.node_types[id.0]
     }
 
-    fn add_node(&mut self, node: Node, span: Span) -> NodeId {
+    pub fn add_node(&mut self, node: Node, span: Span) -> NodeId {
         let id = self.nodes.len();
 
         self.nodes.push(node);
