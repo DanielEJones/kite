@@ -866,6 +866,24 @@ impl Parser {
     }
 }
 
+pub fn parse_standalone_type_into(ty: &str, ast: &mut Ast) -> ParseResult<TypeId> {
+    let lexer = Lexer::new(ty.to_string());
+    let mut parser = Parser::new(lexer);
+
+    parser.tree = std::mem::take(ast);
+
+    let result = parser.attempt(|p| {
+        let ty = p.parse_type()?;
+        p.expect(TokenKind::End)?;
+        Some(ty)
+    });
+
+    let result = result.ok_or_else(|| parser.error());
+
+    *ast = parser.tree;
+    result
+}
+
 type ParseResult<T> = Result<T, ParseError>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -914,6 +932,12 @@ pub struct Ast {
     node_spans: Vec<Span>,           // Assosciated span
     type_spans: Vec<Span>,           // Assosciated span
     node_types: Vec<Option<TypeId>>, // Annotated or inferred type (keyed by NodeId)
+}
+
+impl Default for Ast {
+    fn default() -> Self {
+        Ast::new()
+    }
 }
 
 impl Ast {
