@@ -444,10 +444,36 @@ impl Value {
     }
 
     fn equals(&self, other: &Value) -> bool {
-        match (self, other) {
-            (Value::Num(l), Value::Num(r)) => l == r,
-            (Value::Bool(l), Value::Bool(r)) => l == r,
-            _ => false,
+        let (mut a, mut b) = (self, other);
+        loop {
+            match (a, b) {
+                (Value::Num(l), Value::Num(r)) => return l == r,
+                (Value::Bool(l), Value::Bool(r)) => return l == r,
+                (Value::Variant(l), Value::Variant(r)) => {
+                    // If the names don't equal, never will be equal
+                    if l.name != r.name {
+                        return false;
+                    }
+
+                    // If we have no fields, trivially equal
+                    let (Some((last_l, init_l)), Some((last_r, init_r))) =
+                        (l.fields.split_last(), r.fields.split_last())
+                    else {
+                        return true;
+                    };
+
+                    // If we had fields, check them left to right
+                    if !init_l.iter().zip(init_r).all(|(l, r)| l.equals(r)) {
+                        return false;
+                    }
+
+                    // As an optimisation do a loop for the last fields so that
+                    // structures like `cons(a, list(a))` don't stack overflow
+                    a = last_l;
+                    b = last_r;
+                }
+                _ => return false,
+            }
         }
     }
 }

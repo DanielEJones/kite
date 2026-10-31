@@ -8,14 +8,6 @@ use crate::{
     },
 };
 
-// pub fn check_program(program: &mut Program) -> Result<(), TypeError> {
-//     let Program { defs, ast } = program;
-//     let mut checker = Checker::new(ast);
-//     checker.desugar_records(defs);
-//     checker.check_defs(defs)?;
-//     Ok(())
-// }
-
 pub struct Checker<'a> {
     ast: &'a mut Ast,
     adts: HashMap<String, Adt>,
@@ -395,6 +387,9 @@ impl<'a> Checker<'a> {
             Node::Eq(l, r) | Node::Ne(l, r) => {
                 let ty = self.infer(l)?;
                 self.check_expr(r, ty)?;
+                if !self.ty_comparable(ty) {
+                    return Err(err(span, TypeErrorKind::NotComparable(ty)));
+                }
                 self.prim("bool", span)
             }
 
@@ -968,6 +963,50 @@ impl<'a> Checker<'a> {
         Some(variants)
     }
 
+    fn ty_comparable(&self, ty: TypeId) -> bool {
+        self.determine_comparable(ty, &[], &mut Vec::new())
+    }
+
+    fn determine_comparable(
+        &self,
+        ty: TypeId,
+        assumed: &[String],
+        visiting: &mut Vec<String>,
+    ) -> bool {
+        // assumed are types we are assuming to be true, specifically type vars
+        match self.ty(ty) {
+            Type::Named(n) if assumed.contains(&n) => true,
+            Type::Named(n) => {
+                n == "num" || n == "bool" || self.determine_adt_comparable(&n, visiting)
+            }
+            Type::Applied(b, vars) => {
+                vars.iter()
+                    .all(|a| self.determine_comparable(*a, assumed, visiting))
+                    && self.determine_adt_comparable(&b, visiting)
+            }
+            Type::Function(..) | Type::Forall(..) => false,
+        }
+    }
+
+    fn determine_adt_comparable(&self, name: &str, visiting: &mut Vec<String>) -> bool {
+        if visiting.iter().any(|n| n == name) {
+            return true;
+        }
+
+        let Some(adt) = self.adts.get(name) else {
+            return false;
+        };
+
+        visiting.push(name.to_string());
+        let ok = adt.ctors.iter().all(|(_, fields)| {
+            fields
+                .iter()
+                .all(|f| self.determine_comparable(*f, &adt.vars, visiting))
+        });
+        visiting.pop();
+        ok
+    }
+
     fn prim(&mut self, name: &str, span: Span) -> TypeId {
         self.ast.add_type(Type::Named(name.to_string()), span)
     }
@@ -1101,6 +1140,7 @@ pub enum TypeErrorKind {
         got: usize,
     },
     DuplicateDefinition(String),
+    NotComparable(TypeId),
 }
 
 impl TypeError {
@@ -1134,6 +1174,7 @@ impl TypeError {
                 format!("type `{name}` takes {expected} argument(s), but {got} were given")
             }
             DuplicateDefinition(name) => format!("`{name}` is defined more than once"),
+            NotComparable(ty) => format!("cannot compare values of type {}", t(*ty)),
         };
 
         format!("{}: {msg}", self.span)
