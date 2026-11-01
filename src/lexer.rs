@@ -170,7 +170,7 @@ impl Lexer {
                 return;
             }
 
-            while self.matches(|ch| ch != b'\n' && ch != b'\0') {
+            while self.matches(|ch| ch != b'\n') {
                 self.advance();
             }
         }
