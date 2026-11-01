@@ -244,7 +244,7 @@ impl Parser {
     }
 
     fn parse_type_definition_body(&mut self) -> Option<TypeDefBody> {
-        // TYPE_DEF_BODY ::= "record" "{" PARAMS "}" | VARIANT+
+        // TYPE_DEF_BODY ::= "record" "{" PARAMS "}" | "|"? VARIANT ("|" VARIANT)*
         if self.eat(TokenKind::Record) {
             self.attempt(|p| {
                 p.expect(TokenKind::LBrace)?;
@@ -261,14 +261,16 @@ impl Parser {
                 Some(TypeDefBody::Record(fields))
             })
         } else {
-            let mut variants = Vec::new();
+            self.eat(TokenKind::Pipe);
 
-            while let Some(variant) = self.parse_variant() {
+            let first = self.parse_variant()?;
+            let mut variants = vec![first];
+
+            while let Some(variant) = self.attempt(|p| {
+                p.expect(TokenKind::Pipe)?;
+                p.parse_variant()
+            }) {
                 variants.push(variant);
-            }
-
-            if variants.is_empty() {
-                return None;
             }
 
             Some(TypeDefBody::ADT(variants))
@@ -276,9 +278,8 @@ impl Parser {
     }
 
     fn parse_variant(&mut self) -> Option<Variant> {
-        // VARIANT ::= "|" IDENT [ "(" TYPE ("," TYPE)* ")" ]
+        // VARIANT ::= IDENT [ "(" TYPE ("," TYPE)* ")" ]
         self.attempt(|p| {
-            p.expect(TokenKind::Pipe)?;
             let name = p.expect(TokenKind::Identifier)?;
 
             let args = if p.eat(TokenKind::LParen) {
