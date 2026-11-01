@@ -161,8 +161,18 @@ impl Lexer {
     }
 
     fn lex_whitespace(&mut self) {
-        while self.matches(|ch| ch.is_ascii_whitespace()) {
-            self.advance();
+        loop {
+            while self.matches(|ch| ch.is_ascii_whitespace()) {
+                self.advance();
+            }
+
+            if !self.matches(|ch| ch == b'#') {
+                return;
+            }
+
+            while self.matches(|ch| ch != b'\n') {
+                self.advance();
+            }
         }
     }
 }
