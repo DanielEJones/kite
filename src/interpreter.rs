@@ -607,13 +607,13 @@ impl fmt::Display for EvalError {
 #[macro_export]
 macro_rules! host_fn {
     ($span:ident, [$($arg:ident),* $(,)?] $body:expr) => {
-        |$span: Span, args: &[Value]| -> EvalResult<Value> {
+        |$span: $crate::Span, args: &[$crate::Value]| -> $crate::EvalResult<$crate::Value> {
             match args {
                 [$($arg),*] => $body,
-                _ => Err(EvalError {
+                _ => ::core::result::Result::Err($crate::EvalError {
                     span: $span,
-                    kind: EvalErrorKind::ArityError {
-                        expected: [$(stringify!($arg)),*].len(),
+                    kind: $crate::EvalErrorKind::ArityError {
+                        expected: <[&str]>::len(&[$(stringify!($arg)),*]),
                         got: args.len(),
                     },
                 }),

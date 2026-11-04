@@ -2,13 +2,11 @@ use std::rc::Rc;
 
 use crate::{
     checker::{Checker, TypeError},
-    error::SourceMap,
+    error::{Error, SourceMap},
     interpreter::{EvalError, EvalErrorKind, EvalResult, Interpreter, Value, Variant},
     lexer::{HOST_FILE, Span},
     parser::{Ast, Definition, Program, parse_file_into},
 };
-
-pub use crate::error::Error;
 
 pub struct EngineBuilder {
     host_fns: Vec<HostDecl>,
@@ -37,13 +35,17 @@ impl EngineBuilder {
         self
     }
 
-    pub fn add_source_file(mut self, path: &str) -> Result<Self, Error> {
+    pub fn add_source_file(self, path: &str) -> Result<Self, Error> {
         let text = std::fs::read_to_string(path).map_err(|source| Error::IO {
             path: path.to_string(),
             source,
         })?;
-        self.source_files.add(path, &text);
-        Ok(self)
+        Ok(self.add_source_text(path, &text))
+    }
+
+    pub fn add_source_text(mut self, name: &str, text: &str) -> Self {
+        self.source_files.add(name, text);
+        self
     }
 
     pub fn build(self) -> Result<Engine, Error> {

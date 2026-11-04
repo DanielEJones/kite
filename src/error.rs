@@ -87,12 +87,22 @@ impl SourceMap {
     }
 }
 
+#[derive(Debug)]
 pub enum Error {
     IO { path: String, source: io::Error },
     Unbound(String),
     Parse(Diagnostic),
     Type(Diagnostic),
     Runtime(Diagnostic),
+}
+
+impl std::error::Error for Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Error::IO { source, .. } => Some(source),
+            _ => None,
+        }
+    }
 }
 
 impl fmt::Display for Error {
